@@ -555,6 +555,7 @@ buf_dblwr_process()
 
 		const bool is_all_zero = buf_page_is_zeroes(
 			read_buf, zip_size);
+		byte buf[UNIV_PAGE_SIZE_MAX];
 
 		if (is_all_zero) {
 			/* We will check if the copy in the
@@ -562,24 +563,23 @@ buf_dblwr_process()
 			ignore this page (there should be redo log
 			records to initialize it). */
 		} else {
-			if (fil_page_is_compressed_encrypted(read_buf) ||
-			    fil_page_is_compressed(read_buf)) {
-				/* Decompress the page before
-				validating the checksum. */
-				fil_decompress_page(
-					NULL, read_buf, srv_page_size,
-					NULL, true);
+			/* Decompress the page before
+			validating the checksum. */
+			ulint decomp = fil_page_decompress(buf, read_buf);
+			if (!decomp || (decomp != srv_page_size && zip_size)) {
+				goto bad;
 			}
 
 			if (fil_space_verify_crypt_checksum(
-					read_buf, zip_size, NULL, page_no)
-			   || !buf_page_is_corrupted(
-				   true, read_buf, zip_size, space())) {
+				    read_buf, zip_size, NULL, page_no)
+			    || !buf_page_is_corrupted(
+				    true, read_buf, zip_size, space())) {
 				/* The page is good; there is no need
 				to consult the doublewrite buffer. */
 				continue;
 			}
 
+bad:
 			/* We intentionally skip this message for
 			is_all_zero pages. */
 			ib_logf(IB_LOG_LEVEL_INFO,
@@ -588,18 +588,15 @@ buf_dblwr_process()
 				space_id, page_no);
 		}
 
-		/* Next, validate the doublewrite page. */
-		if (fil_page_is_compressed_encrypted(page) ||
-		    fil_page_is_compressed(page)) {
-			/* Decompress the page before
-			validating the checksum. */
-			fil_decompress_page(
-				NULL, page, srv_page_size, NULL, true);
+		ulint decomp = fil_page_decompress(buf, page);
+		if (!decomp || (decomp != srv_page_size && zip_size)) {
+			goto bad_doublewrite;
 		}
-
-		if (!fil_space_verify_crypt_checksum(page, zip_size, NULL, page_no)
+		if (!fil_space_verify_crypt_checksum(page, zip_size, NULL,
+						     page_no)
 		    && buf_page_is_corrupted(true, page, zip_size, space)) {
 			if (!is_all_zero) {
+bad_doublewrite:
 				ib_logf(IB_LOG_LEVEL_WARN,
 					"A doublewrite copy of page "
 					ULINTPF ":" ULINTPF " is corrupted.",
